@@ -200,6 +200,13 @@ function isFacing(f, other) {
   return (other.x >= f.x && f.facing === 1) || (other.x < f.x && f.facing === -1);
 }
 
+function updateControls() {
+  ui.start.textContent = game.over ? "再战一局" : game.running ? "重新开局" : "开始对战";
+  ui.pause.textContent = game.paused ? "继续" : "暂停";
+  ui.pause.disabled = !game.running || game.over;
+  ui.reset.disabled = !game.running && !game.over;
+}
+
 function updateHud() {
   const p1 = fighters[0];
   const p2 = fighters[1];
@@ -211,6 +218,7 @@ function updateHud() {
   ui.p2HpText.textContent = Math.ceil(clamp(p2.hp, 0, MAX_HP));
   ui.timer.textContent = Math.ceil(game.time);
   ui.state.textContent = game.message;
+  updateControls();
 }
 
 function down(code) {
@@ -610,9 +618,22 @@ function frame(now) {
 }
 
 window.addEventListener("keydown", (event) => {
-  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(event.code)) {
+  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space", "Enter", "Escape"].includes(event.code)) {
     event.preventDefault();
   }
+
+  if (event.code === "Enter") {
+    if (!game.running || game.over) {
+      startMatch();
+    }
+    return;
+  }
+
+  if (event.code === "Escape") {
+    togglePause();
+    return;
+  }
+
   if (!keys.has(event.code)) {
     pressed.add(event.code);
   }
@@ -632,3 +653,4 @@ requestAnimationFrame((now) => {
   lastTime = now;
   requestAnimationFrame(frame);
 });
+
