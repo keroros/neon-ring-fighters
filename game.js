@@ -24,6 +24,11 @@ const ROUND_TIME = 60;
 const MAX_HP = 100;
 const MAX_ENERGY = 100;
 const SPECIAL_COST = 35;
+const DASH_TAP_WINDOW = 0.22;
+const FORWARD_DASH_TIME = 0.18;
+const BACK_DASH_TIME = 0.2;
+const LANDING_RECOVERY = 0.08;
+const AIR_ATTACK_LANDING_RECOVERY = 0.12;
 
 const keys = new Set();
 const pressed = new Set();
@@ -76,11 +81,24 @@ const attacks = {
     cooldown: 0.25,
     energyGain: 13,
   },
+  airLight: {
+    duration: 0.3,
+    activeStart: 0.09,
+    activeEnd: 0.2,
+    reach: 58,
+    height: 46,
+    yOffset: 76,
+    damage: 6,
+    push: 150,
+    cooldown: 0.16,
+    energyGain: 7,
+  },
 };
 
 let fighters;
 let projectiles;
 let sparks;
+let impactRings;
 let game;
 let lastTime = 0;
 
@@ -103,10 +121,16 @@ function makeFighter(id, x, palette, controlsMap) {
     crouching: false,
     blocking: false,
     attack: null,
+    dash: null,
+    dashCooldown: 0,
+    tapWindow: { left: 0, right: 0 },
+    landingRecovery: 0,
+    airAttackUsed: false,
     cooldown: 0,
     hitstun: 0,
     invuln: 0,
     flash: 0,
+    reaction: null,
     wins: 0,
   };
 }
@@ -130,6 +154,7 @@ function resetMatch() {
   ];
   projectiles = [];
   sparks = [];
+  impactRings = [];
   game = {
     running: false,
     paused: false,
@@ -138,6 +163,7 @@ function resetMatch() {
     message: "准备",
     banner: "点击开始对战",
     shake: 0,
+    hitStop: 0,
   };
   updateHud();
   showBanner("霓虹擂台", "点击开始对战");
@@ -229,6 +255,23 @@ function wasPressed(code) {
   return pressed.has(code);
 }
 
+function attackPhase(attack) {
+  if (!attack) return "idle";
+  if (attack.elapsed < attack.activeStart) return "startup";
+  if (attack.elapsed <= attack.activeEnd) return "active";
+  return "recovery";
+}
+
+function attackPhaseLabel(attack) {
+  const labels = {
+    idle: "待机",
+    startup: "起手",
+    active: "生效",
+    recovery: "收招",
+  };
+  return labels[attackPhase(attack)];
+}
+
 function beginAttack(f, type) {
   const data = attacks[type];
   f.attack = {
@@ -239,6 +282,22 @@ function beginAttack(f, type) {
   };
   f.cooldown = data.duration + data.cooldown;
   f.blocking = false;
+  if (type === "airLight") f.airAttackUsed = true;
+}
+
+function beginDash(f, dir) {
+  const forward = dir === f.facing;
+  f.dash = {
+    type: forward ? "forward" : "back",
+    dir,
+    time: forward ? FORWARD_DASH_TIME : BACK_DASH_TIME,
+    max: forward ? FORWARD_DASH_TIME : BACK_DASH_TIME,
+  };
+  f.dashCooldown = forward ? 0.25 : 0.3;
+  f.blocking = false;
+  f.crouching = false;
+  if (!forward) f.invuln = Math.max(f.invuln, 0.08);
+  addSpark(f.x - dir * 22, f.y - 12, forward ? f.palette.trim : "#9cf0ff", "dash");
 }
 
 function launchSpecial(f) {
@@ -262,15 +321,25 @@ function launchSpecial(f) {
     push: 260,
     life: 0.95,
     color: f.palette.trim,
+    trail: [],
   });
 }
 
 function updateFighter(f, other, dt) {
+  const wasOnGround = f.onGround;
   f.facing = other.x >= f.x ? 1 : -1;
   f.cooldown = Math.max(0, f.cooldown - dt);
+  f.dashCooldown = Math.max(0, f.dashCooldown - dt);
+  f.landingRecovery = Math.max(0, f.landingRecovery - dt);
+  f.tapWindow.left = Math.max(0, f.tapWindow.left - dt);
+  f.tapWindow.right = Math.max(0, f.tapWindow.right - dt);
   f.hitstun = Math.max(0, f.hitstun - dt);
   f.invuln = Math.max(0, f.invuln - dt);
   f.flash = Math.max(0, f.flash - dt);
+  if (f.reaction) {
+    f.reaction.time -= dt;
+    if (f.reaction.time <= 0) f.reaction = null;
+  }
 
   if (f.attack) {
     f.attack.elapsed += dt;
@@ -278,11 +347,26 @@ function updateFighter(f, other, dt) {
       f.attack = null;
     }
   }
+  if (f.dash) {
+    f.dash.time -= dt;
+    if (f.dash.time <= 0 || f.hitstun > 0) f.dash = null;
+  }
 
   const input = f.controls;
-  const locked = f.hitstun > 0 || Boolean(f.attack);
+  const locked = f.hitstun > 0 || Boolean(f.attack) || f.landingRecovery > 0 || Boolean(f.dash);
   f.crouching = f.onGround && down(input.down) && !locked;
   f.blocking = down(input.block) && !locked && isFacing(f, other);
+
+  if (f.onGround && !locked && !f.blocking && f.dashCooldown <= 0) {
+    if (wasPressed(input.left)) {
+      if (f.tapWindow.left > 0) beginDash(f, -1);
+      f.tapWindow.left = DASH_TAP_WINDOW;
+    }
+    if (wasPressed(input.right)) {
+      if (f.tapWindow.right > 0) beginDash(f, 1);
+      f.tapWindow.right = DASH_TAP_WINDOW;
+    }
+  }
 
   let move = 0;
   if (!locked && !f.blocking) {
@@ -291,22 +375,29 @@ function updateFighter(f, other, dt) {
   }
 
   if (f.hitstun > 0) {
+    f.dash = null;
     f.vx *= Math.pow(0.08, dt);
+  } else if (f.dash) {
+    const progress = f.dash.time / f.dash.max;
+    const speed = f.dash.type === "forward" ? 620 : 470;
+    f.vx = f.dash.dir * speed * (0.55 + progress * 0.45);
   } else {
     const speed = f.crouching ? 110 : 260;
-    f.vx = move * speed;
+    f.vx = f.onGround ? move * speed : move * 175;
   }
 
-  if (f.onGround && !locked && !f.blocking && wasPressed(input.jump)) {
+  if (f.onGround && !locked && !f.dash && !f.blocking && wasPressed(input.jump)) {
     f.vy = -760;
     f.onGround = false;
     f.crouching = false;
   }
 
-  if (!locked && f.cooldown <= 0) {
-    if (wasPressed(input.light)) beginAttack(f, "light");
-    if (wasPressed(input.heavy)) beginAttack(f, "heavy");
-    if (wasPressed(input.special) && f.energy >= SPECIAL_COST) launchSpecial(f);
+  if (!locked && !f.dash && f.cooldown <= 0) {
+    if (wasPressed(input.light)) {
+      if (f.onGround || !f.airAttackUsed) beginAttack(f, f.onGround ? "light" : "airLight");
+    }
+    if (f.onGround && wasPressed(input.heavy)) beginAttack(f, "heavy");
+    if (f.onGround && wasPressed(input.special) && f.energy >= SPECIAL_COST) launchSpecial(f);
   }
 
   f.vy += GRAVITY * dt;
@@ -317,6 +408,13 @@ function updateFighter(f, other, dt) {
     f.y = FLOOR;
     f.vy = 0;
     f.onGround = true;
+    if (!wasOnGround) {
+      f.landingRecovery = f.airAttackUsed ? AIR_ATTACK_LANDING_RECOVERY : LANDING_RECOVERY;
+      f.airAttackUsed = false;
+      f.dash = null;
+    }
+  } else {
+    f.onGround = false;
   }
 
   f.x = clamp(f.x, 48, W - 48);
@@ -339,14 +437,25 @@ function applyHit(attacker, defender, damage, push, kind) {
   if (defender.invuln > 0 || game.over) return false;
   const blocked = defender.blocking && isFacing(defender, attacker);
   const finalDamage = blocked ? Math.ceil(damage * 0.25) : damage;
+  const impactX = defender.x - attacker.facing * 24;
+  const impactY = defender.y - 72;
   defender.hp = clamp(defender.hp - finalDamage, 0, MAX_HP);
   defender.invuln = blocked ? 0.14 : 0.22;
   defender.hitstun = blocked ? 0.1 : 0.28;
   defender.flash = blocked ? 0.08 : 0.16;
+  defender.reaction = {
+    type: blocked ? "block" : "hit",
+    dir: attacker.facing,
+    time: blocked ? 0.14 : 0.2,
+    max: blocked ? 0.14 : 0.2,
+  };
   defender.vx = attacker.facing * (blocked ? push * 0.45 : push);
   attacker.energy = clamp(attacker.energy + (blocked ? 4 : 9), 0, MAX_ENERGY);
+  if (blocked) defender.energy = clamp(defender.energy + 6, 0, MAX_ENERGY);
   game.shake = blocked ? Math.max(game.shake, 4) : Math.max(game.shake, kind === "special" ? 12 : 7);
-  addSpark(defender.x - attacker.facing * 24, defender.y - 72, blocked ? "#9cf0ff" : "#ffd166", blocked ? "block" : "hit");
+  game.hitStop = Math.max(game.hitStop, blocked ? 0.045 : kind === "special" ? 0.095 : kind === "heavy" ? 0.075 : 0.055);
+  addSpark(impactX, impactY, blocked ? "#9cf0ff" : "#ffd166", blocked ? "block" : kind);
+  addImpactRing(impactX, impactY, blocked ? "#9cf0ff" : kind === "special" ? attacker.palette.trim : "#ffd166", blocked ? "block" : kind);
   return true;
 }
 
@@ -365,13 +474,24 @@ function resolveMelee() {
 
 function updateProjectiles(dt) {
   for (const p of projectiles) {
+    p.trail.push({
+      x: p.x,
+      y: p.y,
+      life: 0.18,
+      max: 0.18,
+      r: p.r,
+    });
+    if (p.trail.length > 9) p.trail.shift();
     p.x += p.vx * dt;
     p.life -= dt;
+    for (const t of p.trail) t.life -= dt;
+    p.trail = p.trail.filter((t) => t.life > 0);
     const owner = fighters.find((f) => f.id === p.owner);
     const defender = fighters.find((f) => f.id !== p.owner);
     const box = { x: p.x - p.r, y: p.y - p.r, w: p.r * 2, h: p.r * 2 };
     if (rectsOverlap(box, bodyRect(defender))) {
       applyHit(owner, defender, p.damage, p.push, "special");
+      addImpactRing(p.x, p.y, p.color, "special");
       p.life = 0;
     }
   }
@@ -379,18 +499,35 @@ function updateProjectiles(dt) {
 }
 
 function addSpark(x, y, color, type) {
-  for (let i = 0; i < 10; i += 1) {
+  const count = type === "special" ? 22 : type === "heavy" ? 16 : type === "block" ? 12 : type === "dash" ? 8 : 10;
+  const speed = type === "block" ? 180 : type === "special" ? 380 : type === "dash" ? 220 : 300;
+  for (let i = 0; i < count; i += 1) {
     sparks.push({
       x,
       y,
-      vx: (Math.random() - 0.5) * (type === "block" ? 180 : 300),
-      vy: (Math.random() - 0.65) * 260,
-      life: 0.28 + Math.random() * 0.18,
-      max: 0.45,
+      vx: (Math.random() - 0.5) * speed,
+      vy: (Math.random() - (type === "dash" ? 0.25 : 0.65)) * (type === "special" ? 340 : 260),
+      life: 0.28 + Math.random() * (type === "special" ? 0.28 : 0.18),
+      max: type === "special" ? 0.56 : 0.45,
       color,
-      size: 3 + Math.random() * 5,
+      size: 3 + Math.random() * (type === "special" ? 8 : 5),
     });
   }
+}
+
+function addImpactRing(x, y, color, type) {
+  const special = type === "special";
+  const heavy = type === "heavy";
+  impactRings.push({
+    x,
+    y,
+    color,
+    life: special ? 0.34 : 0.22,
+    max: special ? 0.34 : 0.22,
+    start: type === "block" ? 10 : 6,
+    end: special ? 68 : heavy ? 48 : 34,
+    width: special ? 6 : heavy ? 5 : 4,
+  });
 }
 
 function updateSparks(dt) {
@@ -403,13 +540,19 @@ function updateSparks(dt) {
   sparks = sparks.filter((s) => s.life > 0);
 }
 
+function updateImpactRings(dt) {
+  for (const r of impactRings) r.life -= dt;
+  impactRings = impactRings.filter((r) => r.life > 0);
+}
+
 function resolveBodyPush() {
   const a = bodyRect(fighters[0]);
   const b = bodyRect(fighters[1]);
   if (!rectsOverlap(a, b)) return;
-  const overlap = a.x + a.w - b.x;
-  fighters[0].x -= overlap / 2;
-  fighters[1].x += overlap / 2;
+  const overlap = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+  const dir = fighters[0].x <= fighters[1].x ? -1 : 1;
+  fighters[0].x += dir * overlap / 2;
+  fighters[1].x -= dir * overlap / 2;
   fighters[0].x = clamp(fighters[0].x, 48, W - 48);
   fighters[1].x = clamp(fighters[1].x, 48, W - 48);
 }
@@ -436,6 +579,14 @@ function finishRound(message) {
 
 function update(dt) {
   if (!game.running || game.paused || game.over) return;
+  if (game.hitStop > 0) {
+    game.hitStop = Math.max(0, game.hitStop - dt);
+    updateSparks(dt * 0.35);
+    updateImpactRings(dt * 0.35);
+    game.shake = Math.max(0, game.shake - 18 * dt);
+    updateHud();
+    return;
+  }
   game.time = Math.max(0, game.time - dt);
   updateFighter(fighters[0], fighters[1], dt);
   updateFighter(fighters[1], fighters[0], dt);
@@ -443,6 +594,7 @@ function update(dt) {
   resolveMelee();
   updateProjectiles(dt);
   updateSparks(dt);
+  updateImpactRings(dt);
   game.shake = Math.max(0, game.shake - 36 * dt);
   checkRoundEnd();
   updateHud();
@@ -493,10 +645,19 @@ function drawFighter(f) {
   const p = f.palette;
   const attacking = f.attack && attacks[f.attack.type];
   const charge = f.attack && f.attack.type === "special";
+  const phase = attackPhase(f.attack);
   const bob = f.onGround ? Math.sin(performance.now() / 140 + f.x) * 2 : 0;
   const y = rect.y + bob;
-  const lean = f.blocking ? -f.facing * 6 : attacking ? f.facing * 7 : 0;
+  const reactionPower = f.reaction ? f.reaction.time / f.reaction.max : 0;
+  const reactionLean = f.reaction
+    ? (f.reaction.type === "block" ? -f.facing * 10 : -f.reaction.dir * 14) * reactionPower
+    : 0;
+  const phaseLean = phase === "startup" ? -f.facing * 5 : phase === "active" ? f.facing * 8 : phase === "recovery" ? f.facing * 3 : 0;
+  const dashLean = f.dash ? f.facing * (f.dash.type === "forward" ? 12 : -9) : 0;
+  const lean = reactionLean || (f.blocking ? -f.facing * 6 : f.dash ? dashLean : phaseLean);
   const flash = f.flash > 0 && Math.floor(performance.now() / 55) % 2 === 0;
+  const guarding = f.blocking || (f.reaction && f.reaction.type === "block");
+  const hitReacting = f.reaction && f.reaction.type === "hit";
 
   ctx.save();
   ctx.translate(f.x, y);
@@ -522,16 +683,25 @@ function drawFighter(f) {
 
   const armY = f.crouching ? 58 : 54;
   ctx.fillStyle = flash ? "#ffffff" : p.glove;
-  if (f.blocking) {
+  if (guarding) {
     ctx.fillRect(8 + lean, armY - 18, 18, 42);
     ctx.fillRect(-26 + lean, armY - 10, 18, 38);
+  } else if (hitReacting) {
+    ctx.fillRect(-42 + lean, armY - 20, 18, 34);
+    ctx.fillRect(18 + lean, armY + 2, 18, 30);
   } else if (attacking) {
-    const reach = f.attack.type === "heavy" ? 64 : 46;
+    const baseReach = f.attack.type === "heavy" ? 64 : f.attack.type === "airLight" ? 56 : 46;
+    const reach = phase === "startup" ? 24 : phase === "active" ? baseReach : 32;
+    const fistSize = f.attack.type === "heavy" ? 26 : 22;
     ctx.fillRect(18 + lean, armY - 8, reach, 17);
-    ctx.fillRect(reach + 14 + lean, armY - 12, 22, 25);
+    ctx.fillRect(reach + 14 + lean, armY - 12, fistSize, 25);
   } else if (charge) {
+    const pulse = Math.sin(performance.now() / 38) * 3;
     ctx.fillRect(16 + lean, armY - 10, 38, 18);
     ctx.fillRect(48 + lean, armY - 16, 18, 30);
+    ctx.strokeStyle = p.trim;
+    ctx.lineWidth = 3;
+    ctx.strokeRect(44 + lean - pulse, armY - 20 - pulse, 28 + pulse * 2, 38 + pulse * 2);
   } else {
     ctx.fillRect(18 + lean, armY - 4, 18, 34);
     ctx.fillRect(-36 + lean, armY - 2, 18, 32);
@@ -539,16 +709,17 @@ function drawFighter(f) {
 
   ctx.fillStyle = flash ? "#ffffff" : p.suitDark;
   const legHeight = f.crouching ? 28 : 54;
-  ctx.fillRect(-22, rect.h - legHeight, 18, legHeight);
-  ctx.fillRect(5, rect.h - legHeight, 18, legHeight);
+  const legSpread = f.dash ? 8 : 0;
+  ctx.fillRect(-22 - legSpread, rect.h - legHeight, 18, legHeight);
+  ctx.fillRect(5 + legSpread, rect.h - legHeight, 18, legHeight);
   ctx.fillStyle = "#0b0d14";
-  ctx.fillRect(-28, rect.h - 8, 28, 8);
-  ctx.fillRect(4, rect.h - 8, 30, 8);
+  ctx.fillRect(-28 - legSpread, rect.h - 8, 28, 8);
+  ctx.fillRect(4 + legSpread, rect.h - 8, 30, 8);
 
-  if (f.blocking) {
+  if (guarding) {
     ctx.strokeStyle = "rgba(156, 240, 255, 0.8)";
     ctx.lineWidth = 4;
-    ctx.strokeRect(30, 30, 18, 70);
+    ctx.strokeRect(30 + lean, 30, 18, 70);
   }
 
   ctx.restore();
@@ -556,6 +727,14 @@ function drawFighter(f) {
 
 function drawProjectiles() {
   for (const p of projectiles) {
+    for (const t of p.trail) {
+      ctx.save();
+      ctx.globalAlpha = clamp(t.life / t.max, 0, 0.7);
+      ctx.translate(t.x, t.y);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(-t.r * 0.9, -8, t.r * 1.8, 16);
+      ctx.restore();
+    }
     ctx.save();
     ctx.translate(p.x, p.y);
     ctx.fillStyle = p.color;
@@ -565,6 +744,21 @@ function drawProjectiles() {
     ctx.strokeStyle = "rgba(255, 255, 255, 0.55)";
     ctx.lineWidth = 3;
     ctx.strokeRect(-25, -15, 50, 30);
+    ctx.restore();
+  }
+}
+
+function drawImpactRings() {
+  for (const r of impactRings) {
+    const progress = 1 - r.life / r.max;
+    const radius = r.start + (r.end - r.start) * progress;
+    ctx.save();
+    ctx.globalAlpha = clamp(r.life / r.max, 0, 1);
+    ctx.strokeStyle = r.color;
+    ctx.lineWidth = r.width;
+    ctx.beginPath();
+    ctx.arc(r.x, r.y, radius, 0, Math.PI * 2);
+    ctx.stroke();
     ctx.restore();
   }
 }
@@ -591,6 +785,22 @@ function drawAttackBoxesDebug() {
     const r = bodyRect(f);
     ctx.strokeRect(r.x, r.y, r.w, r.h);
   }
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "12px monospace";
+  for (const f of fighters) {
+    const r = bodyRect(f);
+    const state = f.attack
+      ? `${f.attack.type}:${attackPhaseLabel(f.attack)}`
+      : f.dash
+        ? `${f.dash.type} dash`
+        : f.landingRecovery > 0
+          ? "landing"
+          : f.reaction ? f.reaction.type : f.blocking ? "block" : "idle";
+    ctx.fillText(`${f.id} ${state}`, r.x, r.y - 8);
+  }
+  if (game.hitStop > 0) {
+    ctx.fillText(`hitStop ${game.hitStop.toFixed(2)}`, 16, 24);
+  }
   ctx.restore();
 }
 
@@ -603,6 +813,7 @@ function render() {
   drawProjectiles();
   drawFighter(fighters[0]);
   drawFighter(fighters[1]);
+  drawImpactRings();
   drawSparks();
   drawAttackBoxesDebug();
   ctx.restore();
