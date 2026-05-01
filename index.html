@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>霓虹擂台</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="cabinet" aria-label="霓虹擂台游戏">
+      <section class="top-panel" aria-label="对局状态">
+        <div class="fighter-card left">
+          <div class="name-row">
+            <span class="name">1P 玄锋</span>
+            <span id="p1-hp-text" class="stat">100</span>
+          </div>
+          <div class="meter health"><span id="p1-health"></span></div>
+          <div class="meter energy"><span id="p1-energy"></span></div>
+        </div>
+
+        <div class="center-card">
+          <div id="timer" class="timer">60</div>
+          <div id="round-state" class="round-state">准备</div>
+        </div>
+
+        <div class="fighter-card right">
+          <div class="name-row">
+            <span id="p2-hp-text" class="stat">100</span>
+            <span class="name">2P 绯影</span>
+          </div>
+          <div class="meter health"><span id="p2-health"></span></div>
+          <div class="meter energy"><span id="p2-energy"></span></div>
+        </div>
+      </section>
+
+      <section class="screen-wrap">
+        <canvas id="game" width="960" height="540" aria-label="双人格斗游戏画布"></canvas>
+        <div id="banner" class="banner">
+          <strong>霓虹擂台</strong>
+          <span>点击开始对战</span>
+        </div>
+      </section>
+
+      <section class="control-bar" aria-label="游戏控制">
+        <button id="start-btn" type="button">开始对战</button>
+        <button id="pause-btn" type="button">暂停</button>
+        <button id="reset-btn" type="button">重新开始</button>
+      </section>
+
+      <section class="key-grid" aria-label="键盘操作">
+        <div>
+          <h2>1P 玄锋</h2>
+          <p><kbd>A</kbd><kbd>D</kbd> 移动 <kbd>W</kbd> 跳跃 <kbd>S</kbd> 蹲下</p>
+          <p><kbd>E</kbd> 格挡 <kbd>F</kbd> 轻拳 <kbd>G</kbd> 重拳 <kbd>H</kbd> 必杀</p>
+        </div>
+        <div>
+          <h2>2P 绯影</h2>
+          <p><kbd>&larr;</kbd><kbd>&rarr;</kbd> 移动 <kbd>&uarr;</kbd> 跳跃 <kbd>&darr;</kbd> 蹲下</p>
+          <p><kbd>I</kbd> 格挡 <kbd>J</kbd> 轻拳 <kbd>K</kbd> 重拳 <kbd>L</kbd> 必杀</p>
+        </div>
+      </section>
+    </main>
+
+    <script src="game.js"></script>
+  </body>
+</html>
